@@ -1,0 +1,83 @@
+{
+    "features": [
+        {
+            "geometry": {
+                "coordinates": [
+                    [
+                        [
+                            -87.617683,
+                            33.234274
+                        ],
+                        [
+                            -87.617615,
+                            33.234132
+                        ]
+                    ]
+                ],
+                "type": "MultiLineString"
+            },
+            "properties": {
+                "felt-color": "#723FA6",
+                "felt-locked": false,
+                "felt-routeMode": "NONE",
+                "felt-showLength": false,
+                "felt-type": "Path"
+            },
+            "type": "Feature"
+        },
+        {
+            "geometry": {
+                "coordinates": [
+                    [
+                        [
+                            -87.617814,
+                            33.234241
+                        ],
+                        [
+                            -87.617751,
+                            33.2341
+                        ]
+                    ]
+                ],
+                "type": "MultiLineString"
+            },
+            "properties": {
+                "felt-color": "#723FA6",
+                "felt-locked": false,
+                "felt-routeMode": "NONE",
+                "felt-showLength": false,
+                "felt-type": "Path"
+            },
+            "type": "Feature"
+        },
+        {
+            "geometry": {
+                "coordinates": [
+                    [
+                        [
+                            -87.617985,
+                            33.234201
+                        ],
+                        [
+                            -87.617919,
+                            33.234059
+                        ]
+                    ]
+                ],
+                "type": "MultiLineString"
+            },
+            "properties": {
+                "felt-color": "#723FA6",
+                "felt-locked": false,
+                "felt-routeMode": "NONE",
+                "felt-showLength": false,
+                "felt-type": "Path"
+            },
+            "type": "Feature"
+        }
+    ],
+    "metadata": {
+        "felt-version": 1
+    },
+    "type": "FeatureCollection"
+}

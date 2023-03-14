@@ -1,0 +1,47 @@
+{
+    "features": [
+        {
+            "geometry": {
+                "coordinates": [
+                    [
+                        [
+                            -87.61809,
+                            33.234182
+                        ],
+                        [
+                            -87.618027,
+                            33.234034
+                        ],
+                        [
+                            -87.616458,
+                            33.234408
+                        ],
+                        [
+                            -87.616506,
+                            33.234547
+                        ],
+                        [
+                            -87.61809,
+                            33.234182
+                        ]
+                    ]
+                ],
+                "type": "MultiLineString"
+            },
+            "properties": {
+                "felt-color": "#C93535",
+                "felt-hasLongDescription": false,
+                "felt-locked": false,
+                "felt-showArea": true,
+                "felt-text": "142_137_Overlap",
+                "felt-type": "Polygon",
+                "felt-widthScale": 1
+            },
+            "type": "Feature"
+        }
+    ],
+    "metadata": {
+        "felt-version": 1
+    },
+    "type": "FeatureCollection"
+}
