@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import itertools
 from typing import Dict, Iterator, List, Set, Tuple
 import numpy as np
 import polars as pl
@@ -78,26 +79,147 @@ class Filtering:
             lnglat_order=True,
         )
 
+    def create_object_id(self, df: pl.DataFrame) -> pl.DataFrame:
+        # make the object id the ui32_objectId + the ip + the date
+        return df.with_columns(
+            [
+                (
+                    pl.col("ui32_objectID").cast(pl.Utf8)
+                    + "~"
+                    + pl.col("ip").cast(pl.Utf8)
+                    + "~"
+                    + pl.col("epoch_time").dt.strftime("%Y-%m-%d")
+                ).alias("object_id"),
+            ]
+        )
+
+    @timeit
+    def clip_trajectory_end(self, df: pl.DataFrame) -> pl.DataFrame:
+        return (
+            df.sort("epoch_time")
+            .with_columns(
+                [
+                    (
+                        (pl.col("f32_velocityInDir_mps").diff().abs() < 0.01).fill_null(
+                            True
+                        )
+                        & (pl.col("f32_velocityInDir_mps") > 0)
+                    )
+                    .over("object_id")
+                    .alias("stopped"),
+                ]
+            )
+            .with_columns(
+                [
+                    (~pl.col("stopped"))
+                    .cast(pl.Int8())
+                    .cumsum()
+                    .over("object_id")
+                    .alias("stopped_count")
+                ]
+            )
+            .with_columns(
+                (pl.col("stopped_count") >= pl.col("stopped_count").max())
+                .over("object_id")
+                .alias("trim")
+            )
+            .filter(~pl.col("trim"))
+            .sort(["object_id", "epoch_time"])
+            .drop(["stopped", "stopped_count", "trim"])
+        )
+
+    @timeit
+    def filter_short_trajectories(
+        self,
+        df: pl.DataFrame,
+        minimum_distance_m: int = 200,
+        minimum_duration_s: int = 5,
+    ) -> pl.DataFrame:
+        return df.filter(
+            pl.col("object_id").is_in(
+                df.groupby("object_id")
+                .agg(
+                    [
+                        # calculate the distance between the first and last position
+                        (
+                            (pl.col("utm_x").first() - pl.col("utm_x").last()).pow(2)
+                            + (pl.col("utm_y").first() - pl.col("utm_y").last()).pow(2)
+                        )
+                        .sqrt()
+                        .alias("straight_distance"),
+                        # (
+                        #     (pl.col("utm_x").diff()) ** 2
+                        #     + (pl.col("utm_y").diff()) ** 2
+                        # )
+                        # .sqrt()
+                        # .sum()
+                        # .alias("distance"),
+                        # calculate the time between the first and last position
+                        (pl.col("epoch_time").last() - pl.col("epoch_time").first())
+                        .dt.seconds()
+                        .alias("duration"),
+                    ]
+                )
+                .filter(
+                    (pl.col("straight_distance") >= minimum_distance_m)
+                    & (pl.col("duration") >= minimum_duration_s)
+                )["object_id"]
+                .to_list()
+            )
+        )
+
+    @timeit
+    def resample(
+        self, df: pl.DataFrame, resample_interval_ms: int = 100
+    ) -> pl.DataFrame:
+        assert resample_interval_ms > 0, "resample_interval_ms must be positive"
+        assert "object_id" in df.columns, "object_id must be in the dataframe"
+        return (
+            df.sort("epoch_time")
+            .groupby_dynamic(
+                index_column="epoch_time",
+                every=f"{100}ms",
+                by=["object_id"],
+            )
+            .agg(
+                [
+                    pl.col(pl.FLOAT_DTYPES).mean(),
+                    *(
+                        pl.col(type_).first()
+                        for type_ in [pl.INTEGER_DTYPES, pl.Utf8, pl.Boolean]
+                    ),
+                ]
+            )
+        )
+
     @timeit
     def rotate_heading(self, df: pl.DataFrame) -> pl.DataFrame:
         return df.with_columns(
             [
                 pl.struct(["f32_directionX", "f32_directionY", "ip"])
                 .apply(
-                    lambda x: 
-                        (np.arctan2(x["f32_directionY"], x["f32_directionX"])
-                        - self.rotations[x["ip"]])
-                        % (2 * np.pi),
+                    lambda x: (
+                        np.arctan2(x["f32_directionY"], x["f32_directionX"])
+                        - self.rotations[x["ip"]]
+                    )
+                    % (2 * np.pi),
                 )
                 .alias("direction"),
             ]
-        ).with_columns([
-            # add also the direction in degrees
-            (pl.col("direction") * (180 / np.pi)).alias("direction_degrees")
-        ])
+        ).with_columns(
+            [
+                # add also the direction in degrees
+                (pl.col("direction") * (180 / np.pi)).alias("direction_degrees")
+            ]
+        )
 
     @timeit
-    def correct_center(self, df: pl.DataFrame) -> pl.DataFrame:
+    def correct_center(
+        self,
+        df: pl.DataFrame,
+        x_col: str = "f32_positionX_m",
+        y_col: str = "f32_positionY_m",
+    ) -> pl.DataFrame:
         return (
             df.with_columns(
                 [
@@ -105,26 +227,27 @@ class Filtering:
                     pl.col("direction").sin().alias("sin"),
                     pl.col("direction").cos().alias("cos"),
                 ]
-            ).with_columns(
+            )
+            .with_columns(
                 [
                     (
-                        pl.col("f32_positionX_m")
+                        pl.col(x_col)
                         + (
                             # subtract this to get the font of the car
-                            + (pl.col("f32_distanceToBack_m").abs()) * pl.col("cos")
+                            +(pl.col("f32_distanceToBack_m").abs()) * pl.col("cos")
                             # add this to get the center of the car
                             - (pl.col("f32_length_m") / 2 * pl.col("cos"))
                         )
-                    ).alias("f32_positionX_m"),
+                    ).alias(x_col),
                     (
-                        pl.col("f32_positionY_m")
+                        pl.col(y_col)
                         + (
                             # subtract this to get the font of the car
-                            + (pl.col("f32_distanceToBack_m").abs()) * pl.col("sin")
+                            +(pl.col("f32_distanceToBack_m").abs()) * pl.col("sin")
                             # add this to get the center of the car
                             - (pl.col("f32_length_m") / 2 * pl.col("sin"))
                         )
-                    ).alias("f32_positionY_m"),
+                    ).alias(y_col),
                 ]
             )
             .drop(["cos", "sin"])
@@ -207,6 +330,9 @@ class Filtering:
 
     @timeit
     def int_h3_2_str(self, df: pl.DataFrame) -> pl.DataFrame:
+        if df["h3"].dtype == pl.Utf8:
+            return df
+
         import h3.api.basic_int as h3_int
 
         return df.with_columns([pl.col("h3").apply(h3_int.h3_to_string).alias("h3")])
@@ -270,15 +396,21 @@ class Fusion:
 
         overlaps = overlaps.div(overlaps.sum(axis=1), axis=0)
 
+        search_combinations = list(itertools.permutations(overlaps.columns, 2))
+
         self._overlap_h3s = {
             pair: list(
-                set(overlaps.loc[overlaps[pair.to] > self._overlap_threshold].index)
-                & set(
-                    overlaps.loc[overlaps[pair.from_] > self._overlap_threshold].index
-                )
+                set(overlaps.loc[overlaps[pair[0]] > self._overlap_threshold].index)
+                & set(overlaps.loc[overlaps[pair[1]] > self._overlap_threshold].index)
             )
-            for pair in self._radar_pairs
+            for pair in search_combinations
         }
+
+        # if the overlap is empty, pop it
+        for k, v in list(self._overlap_h3s.items()):
+            # TODO: this should probably be a parameter
+            if len(v) < 10:
+                self._overlap_h3s.pop(k)
 
     def get_overlaps(
         self,
@@ -287,11 +419,11 @@ class Fusion:
             [
                 {
                     "h3": h3,
-                    "from": p.from_,
-                    "to": p.to,
+                    "from": p[0],
+                    "to": p[1],
                 }
-                for p in self._radar_pairs
-                for h3 in self._overlap_h3s[p]
+                # for p in self._radar_pairs
+                for p, h3 in self._overlap_h3s.items()
             ]
         )
 
@@ -300,20 +432,12 @@ class Fusion:
         print("Joining: ", target_pair)
 
         overlap_df = df.filter(pl.col("h3").is_in(self._overlap_h3s[target_pair]))
-
-        # we need to only get vehicles which end closer to the to radar than the from radar. Unfortunately not that simple
-        # the code must
-        # to_vehicles = df.filter(pl.col("ip") == target_pair.to).groupby(
-        #     "object_id"
-        # ).agg([
-        #     pl.col("h3")
-        # ])
         diff_columns = ["utm_x", "utm_y", "f32_velocityInDir_mps", "direction"]
 
         return (
-            overlap_df.filter(pl.col("ip") == target_pair.to)
+            overlap_df.filter(pl.col("ip") == target_pair[0])
             .join(
-                overlap_df.filter(pl.col("ip") == target_pair.from_).select(
+                overlap_df.filter(pl.col("ip") == target_pair[1]).select(
                     [
                         "h3",
                         "epoch_time",
@@ -348,14 +472,6 @@ class Fusion:
                         ).alias(c)
                         for c in map(lambda x: x + "_diff", diff_columns)
                     ),
-                    # force the angle difference to 0 when stationary (this removes the walking that radar does)
-                    # pl.when(
-                    #     (pl.col("f32_velocityInDir_mps") > 0)
-                    #     & (pl.col("f32_velocityInDir_mps_search") > 0)
-                    # )
-                    # .then((pl.col("angle") - pl.col("angle_search")).abs())
-                    # .otherwise(pl.lit(0))
-                    # .alias("angle_diff"),
                 ]
             )
             .with_columns(
@@ -374,48 +490,13 @@ class Fusion:
             .agg(
                 [
                     # calculate the euclidean distance between the a vection of x, y, and velocity
-                    pl.col("distance").mean().alias("distance"),
-                    # (pl.col("utm_y").first() - pl.col("utm_y").last()).alias(
-                    #     "utm_y_diff"
-                    # ),
-                    # (pl.col("utm_x").first() - pl.col("utm_x").last()).alias(
-                    #     "utm_x_diff"
-                    # ),
-                    # (
-                    #     pl.col("utm_y_search").first() - pl.col("utm_y_search").last()
-                    # ).alias("utm_y_diff_search"),
-                    # (
-                    #     pl.col("utm_x_search").first() - pl.col("utm_x_search").last()
-                    # ).alias("utm_x_diff_search"),
-                ]
-            )
-            # .with_columns(
-            #     [
-            #         pl.struct(["utm_y_diff_search", "utm_x_diff_search"])
-            #         .apply(
-            #             lambda x: math.atan2(
-            #                 x["utm_y_diff_search"], x["utm_x_diff_search"]
-            #             )
-            #         )
-            #         .alias("search_angle"),
-            #         pl.struct(["utm_y_diff", "utm_x_diff"])
-            #         .apply(lambda x: math.atan2(x["utm_y_diff"], x["utm_x_diff"]))
-            #         .alias("veh_angle"),
-            #     ]
-            # )
-            .with_columns(
-                [
                     pl.col("distance")
-                    # add in the angle error as percent of circle. multiplied by 10
-                    # + (
-                    #     (
-                    #         (pl.col("search_angle") - pl.col("veh_angle")).abs()
-                    #         / (2 * math.pi)
-                    #     )
-                    #     # * 10
-                    # )
+                    .mean()
+                    .alias("distance"),
                 ]
             )
+            .with_columns([pl.col("distance")])
+            .filter(pl.col("object_id_search") != pl.col("object_id"))
         )
 
     @timeit
@@ -450,7 +531,7 @@ class Fusion:
         radar_pair: RadarHandoff = None,
         return_distance: bool = False,
     ) -> pl.DataFrame:
-        radar_pairs = [radar_pair] if radar_pair is not None else self._radar_pairs
+        radar_pairs = [(radar_pair.to, radar_pair.from_)] if radar_pair is not None else list(self._overlap_h3s.keys())
 
         if return_distance:
             return pl.concat(
