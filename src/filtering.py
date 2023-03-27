@@ -94,6 +94,55 @@ class Filtering:
         )
 
     @timeit
+    def fix_stop_param_walk(self, df: pl.DataFrame) -> pl.DataFrame:
+        ffill_cols = [
+            'f32_velocityInDir_mps',
+            'utm_x',
+            'utm_y',
+            'lat',
+            'lon',
+            'direction',
+        ]
+                    
+
+        return (
+            df.sort("epoch_time")
+            .with_columns(
+                [
+                    (
+                        # mark stops (velocity < 0.01 m/s) & last velocity also < 0.01 m/s
+                        ((pl.col("f32_velocityInDir_mps").shift(1) < 0.01) & (pl.col("f32_velocityInDir_mps") < 0.01)).fill_null(
+                            False
+                        )
+                    )
+                    .over("object_id")
+                    .alias("stopped"),
+                ]
+            )
+            .with_columns(
+                [
+                    pl.when(pl.col('stopped'))
+                    .then(
+                        pl.lit(None)
+                    ).otherwise(
+                        pl.col(c)
+                    ).alias(c) for c in ffill_cols
+                ]
+            )
+            # forward fill the nulls
+            .with_columns(
+                [
+                    pl.col(c).forward_fill().over('object_id') for c in ffill_cols
+                ]
+            )
+            .drop(
+                [
+                    'stopped',
+                ]
+            )
+        )
+
+    @timeit
     def clip_trajectory_end(self, df: pl.DataFrame) -> pl.DataFrame:
         return (
             df.sort("epoch_time")
@@ -531,7 +580,11 @@ class Fusion:
         radar_pair: RadarHandoff = None,
         return_distance: bool = False,
     ) -> pl.DataFrame:
-        radar_pairs = [(radar_pair.to, radar_pair.from_)] if radar_pair is not None else list(self._overlap_h3s.keys())
+        radar_pairs = (
+            [(radar_pair.to, radar_pair.from_)]
+            if radar_pair is not None
+            else list(self._overlap_h3s.keys())
+        )
 
         if return_distance:
             return pl.concat(

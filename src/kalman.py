@@ -1,13 +1,14 @@
-from typing import Tuple
+from typing import List, Tuple
 from filterpy.kalman import UnscentedKalmanFilter, MerweScaledSigmaPoints
 import numpy as np
 from filterpy.common import Q_continuous_white_noise, Q_discrete_white_noise
 
 import numpy as np
+from scipy.linalg import cho_factor, cho_solve
 
 
 class KalmanConstantAcceleration:
-    P_NOISE = 0.5
+    P_NOISE = 1
     MEASUREMENT_NOISE = 1
     SHAPE = (6, 6)
 
@@ -16,7 +17,7 @@ class KalmanConstantAcceleration:
         self.x = np.array([*x0[:2], 1, *x0[2:], 1])
 
         # this is the kalman gain
-        self.P = np.eye(6) * 3
+        self.P = np.eye(6)
 
         # cache an identity matrix for convenience
         self.I = np.eye(6)
@@ -35,9 +36,7 @@ class KalmanConstantAcceleration:
 
         # process noise. This is a 6x6 matrix, but we only need the top left 3x3
         # and bottom right 3x3 blocks to be non-zero. The rest are zeros.
-        self.Q = Q_discrete_white_noise(
-            dim=3, dt=self.dt, var=self.P_NOISE, block_size=2
-        )
+        self.Q = Q_continuous_white_noise(dim=3, dt=self.dt, block_size=2)
 
         # measurement matrix
         self.H = np.array(
@@ -53,8 +52,8 @@ class KalmanConstantAcceleration:
         self.R = np.array(
             [
                 [5, 0.0, 0.0, 0.0],
-                [0.0, 3, 0.0, 0.0],
-                [0.0, 0.0, 3, 0.0],
+                [0.0, 5, 0.0, 0.0],
+                [0.0, 0.0, 5, 0.0],
                 [0.0, 0.0, 0.0, 5],
             ]
         )
@@ -134,8 +133,7 @@ class KalmanConstantAcceleration:
 
             # get the smoother gain
             K[i] = P[i] @ self.F.T @ np.linalg.inv(Pp[i])
-            
-            
+
             xs[i] += K[i] @ (xs[i + 1] - self.F @ xs[i])
             P[i] += K[i] @ (P[i + 1] - Pp[i]) @ K[i].T
 
@@ -152,15 +150,13 @@ class KalmanConstantAccelerationFadingMemory(KalmanConstantAcceleration):
         _type_: _description_
     """
 
-    
-
     def __init__(self, dt, x0, alpha=1.08):
         super().__init__(dt, x0)
 
         self.alpha = alpha
         self._q_count = 0
 
-        self.history['Q'] = []
+        self.history["Q"] = []
 
     def update(self, z) -> np.ndarray:
         # tracking error
@@ -182,7 +178,7 @@ class KalmanConstantAccelerationFadingMemory(KalmanConstantAcceleration):
         self._update_history()
 
         return self.x
-    
+
     def _update_history(self) -> None:
         super()._update_history()
 
@@ -190,3 +186,249 @@ class KalmanConstantAccelerationFadingMemory(KalmanConstantAcceleration):
 
 
 # create a function to automatically Kalman filter the
+class CTRAModel:
+    pos_x = 0
+    pos_y = 1
+    theta = 2
+    velocity = 3
+    acceleration = 4
+    yaw_rate = 5
+
+    dim_x = 6
+    dim_z = 4
+
+    def __init__(self, dt: float, measured_vars_pos: Tuple[int] = (0, 1, 2, 3)) -> None:
+        self.dt = dt
+        self.measured_vars_pos = measured_vars_pos
+
+        # build H matrix
+        self._H = np.zeros((len(measured_vars_pos), 6))
+        for i, pos in enumerate(measured_vars_pos):
+            self._H[i, pos] = 1
+
+    @property
+    def R(
+        self,
+    ) -> np.ndarray:
+        return np.array(
+            [
+                [5, 0.0, 0.0, 0.0],
+                [0.0, 5, 0.0, 0.0],
+                [0.0, 0.0, 0.8, 0.0],
+                [0.0, 0.0, 0.0, 3],
+            ]
+        ) ** 2
+
+    def F(self, x: np.ndarray, *args, **kwargs) -> np.ndarray:
+        """State transition function
+
+        Args:
+            x (np.ndarray): state vector
+
+        Returns:
+            np.ndarray: state vector
+        """
+        # calculate x
+        # check if the yaw_rate is near zero
+        if np.abs(x[self.yaw_rate]) < 1e-9:
+            new_x = (x[self.velocity] * self.dt + (x[self.acceleration] * self.dt**2) / 2) * np.cos(x[self.theta])
+            new_y = (x[self.velocity] * self.dt + (x[self.acceleration] * self.dt**2) / 2) * np.sin(x[self.theta])
+        else:
+            new_x = (1 / x[self.yaw_rate] ** 2) * (
+                (
+                    x[self.velocity] * x[self.yaw_rate]
+                    + x[self.acceleration] * x[self.yaw_rate] * self.dt
+                )
+                * np.sin(x[self.theta] + x[self.yaw_rate] * self.dt)
+                + x[self.acceleration] * np.cos(x[self.theta] + x[self.yaw_rate] * self.dt)
+                - x[self.velocity] * x[self.yaw_rate] * np.sin(x[self.theta])
+                - x[self.acceleration] * np.cos(x[self.theta])
+            )
+            
+            # calculate y
+            new_y = (1 / x[self.yaw_rate] ** 2) * (
+                (
+                    x[self.velocity] * x[self.yaw_rate]
+                    + x[self.acceleration] * x[self.yaw_rate] * self.dt
+                )
+                * np.cos(x[self.theta] + x[self.yaw_rate] * self.dt)
+                + x[self.acceleration] * np.sin(x[self.theta] + x[self.yaw_rate] * self.dt)
+                + x[self.velocity] * x[self.yaw_rate] * np.cos(x[self.theta])
+                - x[self.acceleration] * np.sin(x[self.theta])
+            )
+
+        new_theta = x[self.yaw_rate] * self.dt
+        new_velocity = x[self.acceleration] * self.dt
+        new_x = (
+            np.array(
+                [new_x, new_y, new_theta, new_velocity, 0, 0]
+            )
+            + x
+        )
+
+        # wrap the angle
+        # new_x[self.theta] = (new_x[self.theta] + np.pi) % (2 * np.pi) - np.pi
+
+        # clamp new_velocity to be positive
+        # new_x[self.velocity] = max(new_x[self.velocity], 0)
+        return new_x
+
+    def H(self, x: np.ndarray, *args, **kwargs) -> np.ndarray:
+        # the measurement function
+        res = self._H @ x
+        # correct the angle
+        # res[self.theta] = (res[self.theta] + np.pi) % (2 * np.pi) - np.pi
+        return res
+
+    # # @property
+    # def Q(
+    #     self,
+    #     *args,
+    #     **kwargs
+    # ) -> np.ndarray:
+        
+    #     # q = np.zeros((6, 6))
+    #     # q[self.pos_x, self.pos_x] = 0.5 * 8.8 * self.dt ** 2
+    #     # q[self.pos_y, self.pos_y] = 0.5 * 8.8 * self.dt ** 2
+    #     # q[self.theta, self.theta] = 0.5 * self.dt
+    #     # q[self.velocity, self.velocity] = 8.8 * self.dt
+    #     # q[self.acceleration, self.acceleration] = 2.0 * self.dt
+    #     # q[self.yaw_rate, self.yaw_rate] = 3 * self.dt
+
+    #     # return q
+    #     return np.diag([
+    #         0.01,
+    #         0.01,
+    #         0.2,
+    #         0.01,
+    #         1,
+    #         1
+    #     ]) * 1
+
+    def residual_func(self, x1: np.ndarray, x2: np.ndarray) -> np.ndarray:
+        """Residual function
+
+        Args:
+            x1 (np.ndarray): state vector
+            x2 (np.ndarray): state vector
+
+        Returns:
+            np.ndarray: residual vector
+        """
+        y = x1 - x2
+        # y[self.theta] = (y[self.theta] + np.pi) % (2 * np.pi) - np.pi
+        return y
+
+    def unscented_transform(
+        self, sigmas, Wm, Wc, *args, **kwargs
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """Unscented transform function
+
+        Args:
+            sigmas (np.ndarray): sigma points
+            Wm (np.ndarray): weights for the mean
+            Wc (np.ndarray): weights for the covariance
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: mean and covariance
+        """
+        kmax, n = sigmas.shape
+
+        # sigma points should not have negative velocity
+        # sigmas[:, self.velocity] = np.abs(sigmas[:, self.velocity])
+
+        x = np.dot(Wm, sigmas)  # dot = \Sigma^n_1 (W[k]*Xi[k])
+
+        # new covariance is the sum of the outer product of the residuals
+        # times the weight
+        # y = sigmas - x[np.newaxis, :]
+        # P = np.dot(y.T, np.dot(np.diag(Wc), y))
+
+        # have to do this the slow way because angles
+        P = np.zeros((n, n))
+        for k in range(kmax):
+            y = self.residual_func(sigmas[k], x)
+            P += Wc[k] * np.outer(y, y)
+
+        P += self.Q(x)
+        return x, P
+
+    def Q(self, x: np.ndarray) -> np.ndarray:
+        # from 10.1109/SDF.2019.8916654
+
+        sigma_a = 10   # the jerk noise. Units are m^2 / s^5
+        sigma_w = 2 # the psd for yaw acceleration. Units of this are rad^2 / s^3
+
+        v_k = x[self.velocity]  # Replace with appropriate value
+        theta_k = x[self.theta]  # Replace with appropriate value
+
+        return np.array(
+            [
+                [
+                    (
+                        sigma_w**2 * v_k**2 * np.sin(theta_k) ** 2
+                        + sigma_a**2 * np.cos(theta_k) ** 2
+                    )
+                    * self.dt**5
+                    / 20,
+                    (sigma_a**2 - sigma_w**2 * v_k**2)
+                    * self.dt**5
+                    / 20
+                    * np.sin(theta_k)
+                    * np.cos(theta_k),
+                    sigma_a**2 * self.dt**4 / 8 * np.cos(theta_k),
+                    -(sigma_w**2) * self.dt**4 / 8 * v_k * np.sin(theta_k),
+                    -(sigma_w**2) * self.dt**3 / 6 * v_k * np.sin(theta_k),
+                    sigma_a**2 * self.dt**3 / 6 * np.cos(theta_k),
+                ],
+                [
+                    (sigma_a**2 - sigma_w**2 * v_k**2)
+                    * self.dt**5
+                    / 20
+                    * np.sin(theta_k)
+                    * np.cos(theta_k),
+                    (
+                        sigma_w**2 * v_k**2 * np.cos(theta_k) ** 2
+                        + sigma_a**2 * np.sin(theta_k) ** 2
+                    )
+                    * self.dt**5
+                    / 20,
+                    sigma_a**2 * self.dt**4 / 8 * np.sin(theta_k),
+                    sigma_w**2 * self.dt**4 / 8 * v_k * np.cos(theta_k),
+                    sigma_w**2 * self.dt**3 / 6 * v_k * np.cos(theta_k),
+                    sigma_a**2 * self.dt**3 / 6 * np.sin(theta_k),
+                ],
+                [
+                    sigma_a**2 * self.dt**4 / 8 * np.cos(theta_k),
+                    sigma_a**2 * self.dt**4 / 8 * np.sin(theta_k),
+                    sigma_a**2 * self.dt**3 / 3,
+                    0,
+                    0,
+                    sigma_a**2 * self.dt**2 / 2,
+                ],
+                [
+                    -(sigma_w**2) * self.dt**4 / 8 * v_k * np.sin(theta_k),
+                    sigma_w**2 * self.dt**4 / 8 * v_k * np.cos(theta_k),
+                    0,
+                    sigma_w**2 * self.dt**3 / 3,
+                    sigma_w**2 * self.dt**2 / 2,
+                    0,
+                ],
+                [
+                    -(sigma_w**2) * self.dt**3 / 6 * v_k * np.sin(theta_k),
+                    sigma_w**2 * self.dt**3 / 6 * v_k * np.cos(theta_k),
+                    0,
+                    sigma_w**2 * self.dt**2 / 2,
+                    sigma_w**2 * self.dt,
+                    0,
+                ],
+                [
+                    sigma_a**2 * self.dt**3 / 6 * np.cos(theta_k),
+                    sigma_a**2 * self.dt**3 / 6 * np.sin(theta_k),
+                    sigma_a**2 * self.dt**2 / 2,
+                    0,
+                    0,
+                    sigma_a**2 * self.dt,
+                ],
+            ]
+        )  # + np.eye(6) * 1e-6
