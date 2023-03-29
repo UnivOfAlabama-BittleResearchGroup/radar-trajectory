@@ -96,14 +96,13 @@ class Filtering:
     @timeit
     def fix_stop_param_walk(self, df: pl.DataFrame) -> pl.DataFrame:
         ffill_cols = [
-            'f32_velocityInDir_mps',
-            'utm_x',
-            'utm_y',
-            'lat',
-            'lon',
-            'direction',
+            "f32_velocityInDir_mps",
+            "utm_x",
+            "utm_y",
+            "lat",
+            "lon",
+            "direction",
         ]
-                    
 
         return (
             df.sort("epoch_time")
@@ -111,9 +110,10 @@ class Filtering:
                 [
                     (
                         # mark stops (velocity < 0.01 m/s) & last velocity also < 0.01 m/s
-                        ((pl.col("f32_velocityInDir_mps").shift(1) < 0.01) & (pl.col("f32_velocityInDir_mps") < 0.01)).fill_null(
-                            False
-                        )
+                        (
+                            (pl.col("f32_velocityInDir_mps").shift(1) < 0.01)
+                            & (pl.col("f32_velocityInDir_mps") < 0.01)
+                        ).fill_null(False)
                     )
                     .over("object_id")
                     .alias("stopped"),
@@ -121,23 +121,20 @@ class Filtering:
             )
             .with_columns(
                 [
-                    pl.when(pl.col('stopped'))
-                    .then(
-                        pl.lit(None)
-                    ).otherwise(
-                        pl.col(c)
-                    ).alias(c) for c in ffill_cols
+                    pl.when(pl.col("stopped"))
+                    .then(pl.lit(None))
+                    .otherwise(pl.col(c))
+                    .alias(c)
+                    for c in ffill_cols
                 ]
             )
             # forward fill the nulls
             .with_columns(
-                [
-                    pl.col(c).forward_fill().over('object_id') for c in ffill_cols
-                ]
+                [pl.col(c).forward_fill().over("object_id") for c in ffill_cols]
             )
             .drop(
                 [
-                    'stopped',
+                    "stopped",
                 ]
             )
         )
@@ -236,23 +233,35 @@ class Filtering:
 
     @timeit
     def rotate_heading(self, df: pl.DataFrame) -> pl.DataFrame:
-        return df.with_columns(
-            [
-                pl.struct(["f32_directionX", "f32_directionY", "ip"])
-                .apply(
-                    lambda x: (
-                        np.arctan2(x["f32_directionY"], x["f32_directionX"])
-                        - self.rotations[x["ip"]]
+        return (
+            df.with_columns(
+                [
+                    pl.struct(["f32_directionX", "f32_directionY", "ip"])
+                    .apply(
+                        lambda x: (
+                            (np.arctan2(x["f32_directionY"], x["f32_directionX"])
+                            - self.rotations[x["ip"]] + np.pi)
+                            % (2 * np.pi)
+                            - np.pi
+                        )
                     )
-                    % (2 * np.pi),
-                )
-                .alias("direction"),
-            ]
-        ).with_columns(
-            [
-                # add also the direction in degrees
-                (pl.col("direction") * (180 / np.pi)).alias("direction_degrees")
-            ]
+                    .alias("direction"),
+                ]
+            )
+            # .with_columns(
+            #     [
+            #         # convert to [-pi, pi]
+            #         ((pl.col("direction") + np.pi) % (2 * np.pi) - np.pi).alias(
+            #             "direction"
+            #         )
+            #     ]
+            # )
+            .with_columns(
+                [
+                    # add also the direction in degrees
+                    (pl.col("direction") * (180 / np.pi)).alias("direction_degrees")
+                ]
+            )
         )
 
     @timeit

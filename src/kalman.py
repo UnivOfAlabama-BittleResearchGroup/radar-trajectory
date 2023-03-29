@@ -1,4 +1,6 @@
-from math import atan2
+import copy
+
+# from math import atan2
 from typing import List, Tuple, Union
 from filterpy.kalman import UnscentedKalmanFilter, MerweScaledSigmaPoints
 import numpy as np
@@ -6,6 +8,7 @@ from filterpy.common import Q_continuous_white_noise, Q_discrete_white_noise
 
 import numpy as np
 from scipy.linalg import cho_factor, cho_solve
+import polars as pl
 
 
 def normalize_radians(x: Union[float, np.ndarray]) -> Union[float, np.ndarray]:
@@ -202,7 +205,7 @@ class CTRAModel:
 
     dim_x = 6
 
-    def __init__(self, dt: float, measured_vars_pos: Tuple[int] = (0, 1, 3)) -> None:
+    def __init__(self, dt: float, measured_vars_pos: Tuple[int] = (0, 1, 2, 3)) -> None:
         self.dt = dt
         self.measured_vars_pos = measured_vars_pos
         self.dim_z = len(measured_vars_pos)
@@ -218,10 +221,10 @@ class CTRAModel:
         return (
             np.array(
                 [
-                    [4.0, 0.0, 0, 0],
-                    [0.0, 4.0, 0, 0],
-                    [0.0, 0.0, 1, 0.0],
-                    [0, 0, 0, 3],
+                    [2, 0.0, 0.0, 0.0],
+                    [0.0, 2, 0.0, 0.0],
+                    [0.0, 0.0, 0.8, 0.0],
+                    [0.0, 0.0, 0.0, 2],
                 ]
             )
             ** 2
@@ -246,7 +249,7 @@ class CTRAModel:
         """
         # calculate x
         # check if the yaw_rate is near zero
-        if np.abs(x[self.yaw_rate]) < 1e-4:
+        if np.abs(x[self.yaw_rate]) < 1e-5:
             new_x = (
                 x[self.velocity] * self.dt + (x[self.acceleration] * self.dt**2) / 2
             ) * np.cos(x[self.theta]) + x[self.pos_x]
@@ -254,7 +257,7 @@ class CTRAModel:
                 x[self.velocity] * self.dt + (x[self.acceleration] * self.dt**2) / 2
             ) * np.sin(x[self.theta]) + x[self.pos_y]
 
-            new_yaw_rate = 0.0001
+            new_yaw_rate = 0.001
         else:
             a1 = 1 / x[self.yaw_rate] ** 2
             a2 = (
@@ -298,41 +301,11 @@ class CTRAModel:
         return new_x
 
     def H(self, x: np.ndarray, *args, **kwargs) -> np.ndarray:
-        return self._H @ x
-
-    # # # @property
-    # def Q(self, *args, **kwargs) -> np.ndarray:
-    #     q = np.zeros((6, 6))
-    #     q[self.pos_x, self.pos_x] = 0.5 * 8.8 * self.dt**2
-    #     q[self.pos_y, self.pos_y] = 0.5 * 8.8 * self.dt**2
-    #     q[self.theta, self.theta] = 4 * self.dt
-    #     q[self.velocity, self.velocity] = 8.8 * self.dt
-    #     q[self.acceleration, self.acceleration] = 2.0 * self.dt
-    #     q[self.yaw_rate, self.yaw_rate] = 0.1 * self.dt
-
-    #     return q
-    # return np.diag([
-    #     0.01,
-    #     0.01,
-    #     0.2,
-    #     0.01,
-    #     1,
-    #     1
-    # ]) * 1
-
-    def residual_func(self, x1: np.ndarray, x2: np.ndarray) -> np.ndarray:
-        """Residual function
-
-        Args:
-            x1 (np.ndarray): state vector
-            x2 (np.ndarray): state vector
-
-        Returns:
-            np.ndarray: residual vector
-        """
-        y = x1 - x2
-        # y[self.theta] = (y[self.theta] + np.pi) % (2 * np.pi) - np.pi
-        return y
+        res = self._H @ x
+        # wrap the angle
+        res[self.theta] = normalize_radians(res[self.theta])
+        return res
+        # return self._H @ x
 
     def unscented_transform(
         self, sigmas, Wm, Wc, noise_cov=None, *args, **kwargs
@@ -347,43 +320,25 @@ class CTRAModel:
         Returns:
             Tuple[np.ndarray, np.ndarray]: mean and covariance
         """
+        print("I shouldn't be here")
         kmax, n = sigmas.shape
 
-        # sigma points should not have negative velocity
-        # sigmas[:, self.velocity] = np.abs(sigmas[:, self.velocity])
+        x = self.state_mean(sigmas, Wm)
 
-        # x = np.dot(Wm, sigmas)  # dot = \Sigma^n_1 (W[k]*Xi[k])
-        sum_sin, sum_cos = 0.0, 0.0
-
-        x = np.zeros(n)
-        for i in range(len(sigmas)):
-            s = sigmas[i]
-            x[:] += s[:] * Wm[i]
-            # x[1] += s[1] * Wm[i]
-            sum_sin += np.sin(s[self.theta]) * Wm[i]
-            sum_cos += np.cos(s[self.theta]) * Wm[i]
-            x[self.theta] = atan2(sum_sin, sum_cos)
-        x[self.theta] = np.arctan2(sum_sin, sum_cos)
-
-        # P = np.dot(y.T, np.dot(np.diag(Wc), y))
-        # # # P += self.Q(x)
         P = np.zeros((n, n))
         for k in range(kmax):
-            y = sigmas[k] - x
-            # normalize the angle
-            y[self.theta] = normalize_radians(y[self.theta])
+            y = self.residual_fn(sigmas[k], x)
             P += Wc[k] * np.outer(y, y)
 
         if noise_cov is not None:
-            P += self.Q(x)
-
+            P += noise_cov
         return x, P
 
     def Q(self, x: np.ndarray) -> np.ndarray:
         # from 10.1109/SDF.2019.8916654
 
         sigma_a = 5  # the jerk noise. Units are m^2 / s^5
-        sigma_w = 2  # the psd for yaw acceleration. Units of this are rad^2 / s^3
+        sigma_w = 5  # the psd for yaw acceleration. Units of this are rad^2 / s^3
 
         v_k = x[self.velocity]
         theta_k = x[self.theta]
@@ -458,3 +413,141 @@ class CTRAModel:
                 ],
             ]
         )  # + np.eye(6) * 1e-6
+
+    def state_mean_gen(self, shape):
+        def state_mean(sigmas, Wm):
+            x = np.zeros(shape)
+            sum_sin = np.sum(np.dot(np.sin(sigmas[:, self.theta]), Wm))
+            sum_cos = np.sum(np.dot(np.cos(sigmas[:, self.theta]), Wm))
+            # sum the rest of the states
+            x = np.dot(Wm, sigmas)
+            x[self.theta] = np.arctan2(sum_sin, sum_cos)
+            return x
+
+        return state_mean
+
+    def residual_fn(self, a, b):
+        y = a - b
+        y[self.theta] = normalize_radians(y[self.theta])
+        return y
+
+    def build_filter(self, measurements: np.ndarray) -> UnscentedKalmanFilter:
+        kf = ModifiedUnscentedKalmanFilter(
+            model=self,
+            dim_x=self.dim_x,
+            dim_z=self.dim_z,
+            dt=self.dt,
+            fx=self.F,
+            hx=self.H,
+            points=MerweScaledSigmaPoints(
+                self.dim_x,
+                alpha=0.1,
+                beta=2,
+                kappa=3 - self.dim_x,
+            ),
+            residual_x=self.residual_fn,
+            residual_z=self.residual_fn,
+            x_mean_fn=self.state_mean_gen(self.dim_x),
+            z_mean_fn=self.state_mean_gen(self.dim_z),
+        )
+
+        kf.x = np.r_[measurements[0], 0.01, 0.01]
+        kf.P = np.diag([0.1 for _ in range(self.dim_x)]) * 1e-3
+        kf.R = self.R
+
+        # initialize the Q matrix
+        kf.Q = self.Q(kf.x)
+        # kf.inv = np.linalg.pinv
+
+        return kf
+
+
+class ModifiedUnscentedKalmanFilter(UnscentedKalmanFilter):
+    def __init__(self, model: CTRAModel, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.model = model
+
+    def predict(self, dt=None, UT=None, fx=None, **fx_args):
+        self.Q = self.model.Q(self.x)
+        return super().predict(dt, UT, fx, **fx_args)
+
+    def update(self, z, R=None, UT=None, hx=None, **hx_args):
+        return super().update(z, R, UT, hx, **hx_args)
+
+    def batch_filter(self, zs, Rs=None, dts=None, saver=None):
+        # skip passing the UT argument to the unscented transform
+        return super().batch_filter(zs, Rs, dts, saver)
+
+    def predict_future(
+        self, time_steps: int, override_yaw_rate: bool = True
+    ) -> np.ndarray:
+        predicted_states = []
+        slice_vars = list(self.model.measured_vars_pos)
+        for _ in range(time_steps):
+            self.predict()
+            if override_yaw_rate:
+                self.x[self.model.yaw_rate] = 0
+            super().update(self.x[slice_vars])
+            predicted_states.append(self.x)
+        return np.array(predicted_states)
+
+
+def polarized_unscented_kalman_filter(
+    df: pl.DataFrame, model: CTRAModel, prediction_steps: int = 50, override_yaw_rate: bool = True
+) -> pl.DataFrame:
+    measurements = df[
+        ["epoch_time", "utm_x", "utm_y", "direction", "f32_velocityInDir_mps"]
+    ].to_numpy()
+
+    # create a new copy of the model
+    model = copy.deepcopy(model)
+
+    kf = model.build_filter(measurements[:, 1:], )
+    try:
+        res, Ps = kf.batch_filter(measurements[:, 1:])
+        measurements[:, 1:] = res[:, list(model.measured_vars_pos)]
+        predicted_states = kf.predict_future(prediction_steps, override_yaw_rate=override_yaw_rate)[
+            :, list(model.measured_vars_pos)
+        ]
+    except np.linalg.LinAlgError:
+        print("Failed to filter {0}", df["object_id"].take(0).to_list()[0])
+        return pl.DataFrame()
+
+    # add time to the states
+    _t = model.dt * 1000
+    predicted_states = np.hstack(
+        (
+            np.arange(
+                measurements[-1, 0] + _t,
+                measurements[-1, 0] + (prediction_steps * _t) + _t,
+                _t,
+            ).reshape(-1, 1),
+            predicted_states,
+        )
+    )
+    stack = np.vstack((measurements, predicted_states))
+
+    return pl.DataFrame(
+        stack,
+        schema=[
+            "epoch_time",
+            "utm_x",
+            "utm_y",
+            "direction",
+            "f32_velocityInDir_mps",
+        ],
+    ).with_columns(
+        [
+            pl.lit(df[c].take(0)).alias(c)
+            for c in df.columns
+            if c
+            not in [
+                "epoch_time",
+                "utm_x",
+                "utm_y",
+                "direction",
+                "f32_velocityInDir_mps",
+            ]
+        ]
+    )
