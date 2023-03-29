@@ -196,13 +196,6 @@ class Filtering:
                         )
                         .sqrt()
                         .alias("straight_distance"),
-                        # (
-                        #     (pl.col("utm_x").diff()) ** 2
-                        #     + (pl.col("utm_y").diff()) ** 2
-                        # )
-                        # .sqrt()
-                        # .sum()
-                        # .alias("distance"),
                         # calculate the time between the first and last position
                         (pl.col("epoch_time").last() - pl.col("epoch_time").first())
                         .dt.seconds()
