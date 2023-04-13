@@ -221,10 +221,10 @@ class CTRAModel:
         return (
             np.array(
                 [
-                    [2, 0.0, 0.0, 0.0],
-                    [0.0, 2, 0.0, 0.0],
-                    [0.0, 0.0, 0.8, 0.0],
-                    [0.0, 0.0, 0.0, 2],
+                    [3, 0.0, 0.0, 0.0],
+                    [0.0, 3, 0.0, 0.0],
+                    [0.0, 0.0, 0.2, 0.0],
+                    [0.0, 0.0, 0.0, 1],
                 ]
             )
             ** 2
@@ -334,11 +334,13 @@ class CTRAModel:
             P += noise_cov
         return x, P
 
+    # def Q(self, )
+
     def Q(self, x: np.ndarray) -> np.ndarray:
         # from 10.1109/SDF.2019.8916654
 
         sigma_a = 5  # the jerk noise. Units are m^2 / s^5
-        sigma_w = 5  # the psd for yaw acceleration. Units of this are rad^2 / s^3
+        sigma_w = 3  # the psd for yaw acceleration. Units of this are rad^2 / s^3
 
         v_k = x[self.velocity]
         theta_k = x[self.theta]
@@ -452,7 +454,7 @@ class CTRAModel:
         )
 
         kf.x = np.r_[measurements[0], 0.01, 0.01]
-        kf.P = np.diag([0.1 for _ in range(self.dim_x)]) * 1e-3
+        kf.P = np.diag([0.1 for _ in range(self.dim_x)])  # * 1e-3
         kf.R = self.R
 
         # initialize the Q matrix
@@ -494,7 +496,10 @@ class ModifiedUnscentedKalmanFilter(UnscentedKalmanFilter):
 
 
 def polarized_unscented_kalman_filter(
-    df: pl.DataFrame, model: CTRAModel, prediction_steps: int = 50, override_yaw_rate: bool = True
+    df: pl.DataFrame,
+    model: CTRAModel,
+    prediction_steps: int = 50,
+    override_yaw_rate: bool = True,
 ) -> pl.DataFrame:
     measurements = df[
         ["epoch_time", "utm_x", "utm_y", "direction", "f32_velocityInDir_mps"]
@@ -503,13 +508,15 @@ def polarized_unscented_kalman_filter(
     # create a new copy of the model
     model = copy.deepcopy(model)
 
-    kf = model.build_filter(measurements[:, 1:], )
+    kf = model.build_filter(
+        measurements[:, 1:],
+    )
     try:
         res, Ps = kf.batch_filter(measurements[:, 1:])
         measurements[:, 1:] = res[:, list(model.measured_vars_pos)]
-        predicted_states = kf.predict_future(prediction_steps, override_yaw_rate=override_yaw_rate)[
-            :, list(model.measured_vars_pos)
-        ]
+        predicted_states = kf.predict_future(
+            prediction_steps, override_yaw_rate=override_yaw_rate
+        )[:, list(model.measured_vars_pos)]
     except np.linalg.LinAlgError:
         print("Failed to filter {0}", df["object_id"].take(0).to_list()[0])
         return pl.DataFrame()

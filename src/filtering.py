@@ -38,6 +38,7 @@ class Filtering:
         # overlap_zone_path: str,
     ) -> None:
         self.h3_resolution = 14
+        self.crop_radius_m = 250
 
         (
             self.radar_locations,
@@ -94,6 +95,14 @@ class Filtering:
         )
 
     @timeit
+    def crop_radius(self, df: pl.DataFrame, radius: float = None) -> pl.DataFrame:
+        radius = radius or self.crop_radius_m
+        return df.filter(
+            (pl.col("f32_positionX_m") ** 2 + pl.col("f32_positionY_m") ** 2)
+            <= (radius**2)
+        )
+
+    @timeit
     def fix_stop_param_walk(self, df: pl.DataFrame) -> pl.DataFrame:
         ffill_cols = [
             "f32_velocityInDir_mps",
@@ -146,9 +155,9 @@ class Filtering:
             .with_columns(
                 [
                     (
-                        (pl.col("f32_velocityInDir_mps").diff().abs() < 0.01).fill_null(
-                            True
-                        )
+                        (
+                            pl.col("f32_velocityInDir_mps").diff().abs() < 0.001
+                        ).fill_null(True)
                         & (pl.col("f32_velocityInDir_mps") > 0)
                     )
                     .over("object_id")
@@ -239,8 +248,11 @@ class Filtering:
                     pl.struct(["f32_directionX", "f32_directionY", "ip"])
                     .apply(
                         lambda x: (
-                            (np.arctan2(x["f32_directionY"], x["f32_directionX"])
-                            - self.rotations[x["ip"]] + np.pi)
+                            (
+                                np.arctan2(x["f32_directionY"], x["f32_directionX"])
+                                - self.rotations[x["ip"]]
+                                + np.pi
+                            )
                             % (2 * np.pi)
                             - np.pi
                         )
@@ -256,12 +268,13 @@ class Filtering:
             #         )
             #     ]
             # )
-            .with_columns(
-                [
-                    # add also the direction in degrees
-                    (pl.col("direction") * (180 / np.pi)).alias("direction_degrees")
-                ]
-            )
+            .pipe(self.direction_to_degrees)
+        )
+
+    @timeit
+    def direction_to_degrees(self, df: pl.DataFrame) -> pl.DataFrame:
+        return df.with_columns(
+            [(pl.col("direction") * (180 / np.pi)).alias("direction_degrees")]
         )
 
     @timeit
@@ -348,35 +361,55 @@ class Filtering:
         )
 
     @timeit
-    def radar_to_latlon(self, df: pl.DataFrame) -> pl.DataFrame:
+    def radar_to_latlon(
+        self,
+        df: pl.DataFrame,
+        utm_x_col: str = "utm_x",
+        utm_y_col: str = "utm_y",
+        lat_col: str = "lat",
+        lon_col: str = "lon",
+    ) -> pl.DataFrame:
         # add a row number column
+
+        # drop the original lat lon columns
         df = df.with_row_count()
         tmp = df.select(
             [
                 "row_nr",
-                "x",
-                "y",
+                utm_x_col,
+                utm_y_col,
             ]
         ).to_pandas(use_pyarrow_extension_array=False)
 
         # convert to latlon using utm. This could be chunked
         # TODO: chunk this
-        tmp["lat_new"], tmp["lon_new"] = utm.to_latlon(
-            tmp["x"].values, tmp["y"].values, self.utm_zone[0], self.utm_zone[1]
+        tmp[lat_col], tmp[lon_col] = utm.to_latlon(
+            tmp[utm_x_col].values,
+            tmp[utm_y_col].values,
+            self.utm_zone[0],
+            self.utm_zone[1],
         )
 
         # convert back to polars
-        return df.join(
-            pl.from_pandas(tmp[["lat_new", "lon_new", "row_nr"]], include_index=False),
-            on="row_nr",
-        ).drop(["row_nr"])
+        return (
+            df.drop([c for c in [lat_col, lon_col] if c in df.columns])
+            .join(
+                pl.from_pandas(tmp[[lat_col, lon_col, "row_nr"]], include_index=False),
+                on="row_nr",
+            )
+            .drop(["row_nr"])
+        )
 
     @timeit
-    def radar_to_h3(self, df: pl.DataFrame) -> pl.DataFrame:
+    def radar_to_h3(
+        self, df: pl.DataFrame, col_name: str = "h3", resolution: int = None
+    ) -> pl.DataFrame:
+        if resolution is None:
+            resolution = self.h3_resolution
         return df.with_column(
             pl.struct(["lat", "lon"])
-            .apply(lambda x: h3.geo_to_h3(x["lat"], x["lon"], self.h3_resolution))
-            .alias("h3")
+            .apply(lambda x: h3.geo_to_h3(x["lat"], x["lon"], resolution))
+            .alias(col_name)
         )
 
     @timeit
@@ -483,7 +516,11 @@ class Fusion:
         print("Joining: ", target_pair)
 
         overlap_df = df.filter(pl.col("h3").is_in(self._overlap_h3s[target_pair]))
-        diff_columns = ["utm_x", "utm_y", "f32_velocityInDir_mps", "direction"]
+        diff_columns = [
+            "utm_x",
+            "utm_y",
+            "f32_velocityInDir_mps",
+        ]  # "direction"]
 
         return (
             overlap_df.filter(pl.col("ip") == target_pair[0])
@@ -508,7 +545,10 @@ class Fusion:
             .with_columns(
                 [
                     *(
+                        # TODO: Correctly handle the angle
                         (pl.col(c) - pl.col(c + "_search")).abs().alias(c + "_diff")
+                        # if c not in ["direction"]
+                        # else (pl.col(c) - pl.col(c + "_search")).apply(lambda x: x  % (2 * np.pi)).alias(c + "_diff")
                         for c in diff_columns
                     ),
                 ]
