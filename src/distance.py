@@ -6,9 +6,11 @@ from scipy.spatial.distance import directed_hausdorff
 def hausdorff(u, v):
     return max(directed_hausdorff(u, v)[0], directed_hausdorff(v, u)[0])
 
-def calculate_distance(i, u, vehicles_):
+def calculate_distance(inds, vehicles_):
     row = np.zeros(len(vehicles_))
-    for j in range(i + 1, len(vehicles_)):
-        # row[j] = similaritymeasures.frechet_dist(u, vehicles_[j])
-        row[j] = hausdorff(u, vehicles_[j])
-    return i, row
+    for u, v, val in inds:
+        if val > 0:
+            row[v] = np.inf
+        else:
+            row[v] = hausdorff(vehicles_[u], vehicles_[v])
+    return u, row

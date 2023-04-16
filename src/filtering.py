@@ -408,7 +408,7 @@ class Filtering:
             resolution = self.h3_resolution
         return df.with_column(
             pl.struct(["lat", "lon"])
-            .apply(lambda x: h3.geo_to_h3(x["lat"], x["lon"], resolution))
+            .apply(lambda x: h3.geo_to_h3(x["lat"], x["lon"], resolution), return_dtype=pl.Utf8)
             .alias(col_name)
         )
 
