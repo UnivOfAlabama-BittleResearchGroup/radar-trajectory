@@ -472,10 +472,12 @@ class LaneDetection:
             angle = self._angle_cache[
                 ((path[i], path[i + 1]), (path[i + 1], path[i + 2]))
             ]
-            if angle < 30:
+            if angle < 90:
                 split_path[-1].append(path[i + 1])
             else:
                 split_path.append([])
+
+        split_path[-1].append(path[-1])
 
         for p in split_path:
             if len(p) > 1:

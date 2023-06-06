@@ -39,6 +39,7 @@ class Filtering:
     ) -> None:
         self.h3_resolution = 14
         self.crop_radius_m = 250
+        self._crop_angle = 0.5 * 110 * (math.pi / 180)
 
         (
             self.radar_locations,
@@ -80,6 +81,13 @@ class Filtering:
             lnglat_order=True,
         )
 
+    @timeit
+    def crop_angle(self, df: pl.LazyFrame) -> pl.LazyFrame:
+        return df.filter(
+            pl.col("f32_positionX_m").abs() < (pl.col("f32_positionY_m") * np.tan(self._crop_angle))
+        )
+
+    
     def create_object_id(self, df: pl.DataFrame) -> pl.DataFrame:
         # make the object id the ui32_objectId + the ip + the date
         return df.with_columns(
@@ -91,6 +99,14 @@ class Filtering:
                     + "~"
                     + pl.col("epoch_time").dt.strftime("%Y-%m-%d")
                 ).alias("object_id"),
+            ]
+        )
+
+    @timeit
+    def object_id_2_int(self, df: pl.DataFrame) -> pl.DataFrame:
+        return df.with_columns(
+            [
+                pl.col("object_id").cast(pl.Categorical).cast(pl.Int64).alias("object_id"),
             ]
         )
 
@@ -211,8 +227,7 @@ class Filtering:
                 .filter(
                     (pl.col("straight_distance") >= minimum_distance_m)
                     & (pl.col("duration") >= minimum_duration_s)
-                )["object_id"]
-                .to_list()
+                ).select("object_id").to_series(0)
             )
         )
 

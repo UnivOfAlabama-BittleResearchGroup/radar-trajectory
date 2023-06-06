@@ -194,6 +194,52 @@ class KalmanConstantAccelerationFadingMemory(KalmanConstantAcceleration):
         self.history["Q"].append(self.Q)
 
 
+class KalmanConstantAcceleration1D(KalmanConstantAcceleration):
+
+    """
+    The state is [x, x', x''], [x, x'] is the position and velocity in x-direction
+    F: state transition matrix --> (3,3)
+    H: measurement matrix --> (1,3)
+    X: mean --> [x, x', x''] --> (3,) vector
+    P: covariance --> (x_dim, x_dim) --> (3,3)
+    Q: process noise --> (x_dim, x_dim) --> (3,3)
+    R: measurement noise --> (z_dim, z_dim) --> (1,1), z --> measurement
+    """
+
+    def __init__(self, dt, x0) -> None:
+        self.history = {
+            "x": [],
+            "P": [],
+        }
+        self.dt = dt
+        self.x = np.array([*x0[:2], 0])
+        self.P = np.eye(3)
+        self.I = np.eye(3)
+        self.F = np.array(
+            [
+                [1.0, self.dt, 0.5 * self.dt**2],
+                [0.0, 1.0, self.dt],
+                [0.0, 0.0, 1.0],
+            ]
+        )
+
+        self.Q = Q_continuous_white_noise(dim=3, dt=self.dt, block_size=1)
+
+        self.H = np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ]
+        )
+
+        self.R = np.array(
+            [
+                [5, 0.0],
+                [0.0, 2],
+            ]
+        )
+
+
 # create a function to automatically Kalman filter the
 class CTRAModel:
     pos_x = 0
@@ -221,10 +267,10 @@ class CTRAModel:
         return (
             np.array(
                 [
-                    [3, 0.0, 0.0, 0.0],
-                    [0.0, 3, 0.0, 0.0],
+                    [2.0, 0.0, 0.0, 0.0],
+                    [0.0, 2.0, 0.0, 0.0],
                     [0.0, 0.0, 0.2, 0.0],
-                    [0.0, 0.0, 0.0, 1],
+                    [0.0, 0.0, 0.0, 0.5],
                 ]
             )
             ** 2
@@ -339,7 +385,7 @@ class CTRAModel:
     def Q(self, x: np.ndarray) -> np.ndarray:
         # from 10.1109/SDF.2019.8916654
 
-        sigma_a = 5  # the jerk noise. Units are m^2 / s^5
+        sigma_a = 10  # the jerk noise. Units are m^2 / s^5
         sigma_w = 3  # the psd for yaw acceleration. Units of this are rad^2 / s^3
 
         v_k = x[self.velocity]
